@@ -113,22 +113,28 @@ fn prime_checker_app() -> Html {
 
     // Set up interval to recheck every 100ms
     {
-        let input = input.clone();
         let result = result.clone();
         let checker = checker.clone();
+        let input_clone = input.clone();
 
-        use_effect_with((), move |_| {
-            let interval = Interval::new(100, move || {
-                let input_val = (*input).clone();
-                if !input_val.is_empty() {
-                    let mut checker_mut = checker.borrow_mut();
-                    let new_result = checker_mut.check(&input_val);
-                    result.set(new_result);
-                }
-            });
+        use_effect(move || {
+            let interval_handle = {
+                let result = result.clone();
+                let checker = checker.clone();
+                let input_clone = input_clone.clone();
+
+                Interval::new(100, move || {
+                    let input_val = (*input_clone).clone();
+                    if !input_val.is_empty() {
+                        let mut checker_mut = checker.borrow_mut();
+                        let new_result = checker_mut.check(&input_val);
+                        result.set(new_result);
+                    }
+                })
+            };
 
             // Return cleanup function
-            move || drop(interval)
+            move || drop(interval_handle)
         });
     }
 
