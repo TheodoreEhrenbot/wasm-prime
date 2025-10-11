@@ -40,6 +40,13 @@ pub enum PrimeStatus {
     ProbablyPrime(usize), // Number of Miller-Rabin tests passed
 }
 
+#[derive(Clone, Debug)]
+pub enum Factor {
+    Prime(BigUint),
+    Composite(BigUint),
+    Unknown(BigUint),
+}
+
 pub struct PrimeChecker {
     results: HashMap<BigUint, PrimeStatus>,
 }
@@ -62,6 +69,73 @@ impl PrimeChecker {
             Some(PrimeStatus::ProbablyPrime(tests)) if *tests >= 10 => true,
             _ => false,
         }
+    }
+
+    pub fn is_composite(&self, n: &BigUint) -> bool {
+        if n < &BigUint::from(2u32) {
+            return true;
+        }
+        if n == &BigUint::from(2u32) || n == &BigUint::from(3u32) {
+            return false;
+        }
+        matches!(self.results.get(n), Some(PrimeStatus::Composite))
+    }
+
+    pub fn factorize(&mut self, n: &BigUint) -> Vec<Factor> {
+        let mut factors = Vec::new();
+        let mut remaining = n.clone();
+        let mut budget = 1_000_000u64;
+
+        // Handle small cases
+        if remaining < BigUint::from(2u32) {
+            return vec![Factor::Unknown(remaining)];
+        }
+
+        // Factor out 2s
+        while &remaining % 2u32 == BigUint::zero() {
+            factors.push(Factor::Prime(BigUint::from(2u32)));
+            remaining /= 2u32;
+        }
+
+        // Try odd divisors up to budget
+        let mut divisor = BigUint::from(3u32);
+        while &divisor * &divisor <= remaining && budget > 0 {
+            while &remaining % &divisor == BigUint::zero() {
+                // Check if this divisor is prime
+                for _ in 0..10 {
+                    self.check(&divisor.to_string());
+                }
+
+                if self.is_probably_prime(&divisor) {
+                    factors.push(Factor::Prime(divisor.clone()));
+                } else if self.is_composite(&divisor) {
+                    factors.push(Factor::Composite(divisor.clone()));
+                } else {
+                    factors.push(Factor::Unknown(divisor.clone()));
+                }
+
+                remaining /= &divisor;
+            }
+            divisor += 2u32;
+            budget -= 1;
+        }
+
+        // Check what's left
+        if remaining > BigUint::one() {
+            for _ in 0..10 {
+                self.check(&remaining.to_string());
+            }
+
+            if self.is_probably_prime(&remaining) {
+                factors.push(Factor::Prime(remaining));
+            } else if self.is_composite(&remaining) {
+                factors.push(Factor::Composite(remaining));
+            } else {
+                factors.push(Factor::Unknown(remaining));
+            }
+        }
+
+        factors
     }
 
     pub fn check(&mut self, n_str: &str) -> String {
@@ -122,6 +196,7 @@ impl PrimeChecker {
 fn prime_checker_app() -> Html {
     let input = use_state(|| String::new());
     let result = use_state(|| String::new());
+    let factorization = use_state(|| Vec::<Factor>::new());
     let checker = use_mut_ref(|| PrimeChecker::new());
 
     // Set up interval to recheck every 100ms
@@ -154,6 +229,7 @@ fn prime_checker_app() -> Html {
     let on_input = {
         let input = input.clone();
         let result = result.clone();
+        let factorization = factorization.clone();
         let checker = checker.clone();
 
         Callback::from(move |e: InputEvent| {
@@ -165,6 +241,18 @@ fn prime_checker_app() -> Html {
             let mut checker_mut = checker.borrow_mut();
             let new_result = checker_mut.check(&value);
             result.set(new_result);
+
+            // Compute factorization
+            if let Some(n) = BigUint::parse_bytes(value.as_bytes(), 10) {
+                if n >= BigUint::from(2u32) {
+                    let factors = checker_mut.factorize(&n);
+                    factorization.set(factors);
+                } else {
+                    factorization.set(Vec::new());
+                }
+            } else {
+                factorization.set(Vec::new());
+            }
         })
     };
 
@@ -248,6 +336,36 @@ fn prime_checker_app() -> Html {
                 }
             </div>
             <div>{ (*result).clone() }</div>
+            if !factorization.is_empty() {
+                <div style="margin-top: 10px;">
+                    <strong>{ "Factorization: " }</strong>
+                    {
+                        factorization.iter().enumerate().map(|(i, factor)| {
+                            let separator = if i > 0 { " × " } else { "" };
+                            match factor {
+                                Factor::Prime(n) => html! {
+                                    <span>
+                                        { separator }
+                                        <span style="color: green;">{ n.to_string() }</span>
+                                    </span>
+                                },
+                                Factor::Composite(n) => html! {
+                                    <span>
+                                        { separator }
+                                        <span style="color: red; font-weight: bold;">{ n.to_string() }</span>
+                                    </span>
+                                },
+                                Factor::Unknown(n) => html! {
+                                    <span>
+                                        { separator }
+                                        <span style="color: orange;">{ n.to_string() }</span>
+                                    </span>
+                                },
+                            }
+                        }).collect::<Html>()
+                    }
+                </div>
+            }
         </div>
     }
 }
