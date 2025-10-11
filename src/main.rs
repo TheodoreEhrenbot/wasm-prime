@@ -170,21 +170,14 @@ fn prime_checker_app() -> Html {
 
     // Determine if we should show prev/next buttons
     let current_n = BigUint::parse_bytes((*input).as_bytes(), 10);
-    let checker_borrow = checker.borrow();
 
     let show_prev = if let Some(ref n) = current_n {
-        n > &BigUint::from(2u32) && checker_borrow.is_probably_prime(n)
+        n > &BigUint::from(2u32)
     } else {
         false
     };
 
-    let show_next = if let Some(ref n) = current_n {
-        checker_borrow.is_probably_prime(n)
-    } else {
-        false
-    };
-
-    drop(checker_borrow);
+    let show_next = current_n.is_some();
 
     let on_prev = {
         let input = input.clone();
