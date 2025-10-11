@@ -49,12 +49,16 @@ pub enum Factor {
 
 pub struct PrimeChecker {
     results: HashMap<BigUint, PrimeStatus>,
+    factorization_state: HashMap<BigUint, (Vec<Factor>, BigUint, BigUint)>, // (factors found, remaining, next divisor to try)
+    factorization_complete: HashMap<BigUint, Vec<Factor>>, // Complete factorizations
 }
 
 impl PrimeChecker {
     pub fn new() -> Self {
         PrimeChecker {
             results: HashMap::new(),
+            factorization_state: HashMap::new(),
+            factorization_complete: HashMap::new(),
         }
     }
 
@@ -81,24 +85,57 @@ impl PrimeChecker {
         matches!(self.results.get(n), Some(PrimeStatus::Composite))
     }
 
-    pub fn factorize(&mut self, n: &BigUint) -> Vec<Factor> {
-        let mut factors = Vec::new();
-        let mut remaining = n.clone();
+    pub fn factorize(&mut self, n: &BigUint) -> (Vec<Factor>, BigUint) {
+        // Handle small cases
+        if n < &BigUint::from(2u32) {
+            return (vec![Factor::Unknown(n.clone())], BigUint::zero());
+        }
+
+        // Check if we already have a complete factorization
+        if let Some(complete_factors) = self.factorization_complete.get(n) {
+            // Just update the factor status based on new Miller-Rabin tests
+            let updated_factors: Vec<Factor> = complete_factors.iter().map(|factor| {
+                match factor {
+                    Factor::Prime(f) | Factor::Composite(f) | Factor::Unknown(f) => {
+                        // Re-check primality status
+                        if self.is_probably_prime(f) {
+                            Factor::Prime(f.clone())
+                        } else if self.is_composite(f) {
+                            Factor::Composite(f.clone())
+                        } else {
+                            Factor::Unknown(f.clone())
+                        }
+                    }
+                }
+            }).collect();
+
+            // Update the cache
+            self.factorization_complete.insert(n.clone(), updated_factors.clone());
+
+            // Return the max divisor checked (which is complete)
+            return (updated_factors, n.clone());
+        }
+
+        // Check if we have cached state
+        let (mut factors, mut remaining, mut divisor) = if let Some((cached_factors, cached_remaining, cached_divisor)) = self.factorization_state.get(n) {
+            (cached_factors.clone(), cached_remaining.clone(), cached_divisor.clone())
+        } else {
+            // Start fresh
+            let mut factors = Vec::new();
+            let mut remaining = n.clone();
+
+            // Factor out 2s
+            while &remaining % 2u32 == BigUint::zero() {
+                factors.push(Factor::Prime(BigUint::from(2u32)));
+                remaining /= 2u32;
+            }
+
+            (factors, remaining, BigUint::from(3u32))
+        };
+
         let mut budget = 1_000_000u64;
 
-        // Handle small cases
-        if remaining < BigUint::from(2u32) {
-            return vec![Factor::Unknown(remaining)];
-        }
-
-        // Factor out 2s
-        while &remaining % 2u32 == BigUint::zero() {
-            factors.push(Factor::Prime(BigUint::from(2u32)));
-            remaining /= 2u32;
-        }
-
-        // Try odd divisors up to budget
-        let mut divisor = BigUint::from(3u32);
+        // Continue trying divisors
         while &divisor * &divisor <= remaining && budget > 0 {
             while &remaining % &divisor == BigUint::zero() {
                 // Check if this divisor is prime
@@ -120,22 +157,34 @@ impl PrimeChecker {
             budget -= 1;
         }
 
+        let checked_up_to = divisor.clone();
+
         // Check what's left
+        let mut final_factors = factors.clone();
         if remaining > BigUint::one() {
             for _ in 0..10 {
                 self.check(&remaining.to_string());
             }
 
             if self.is_probably_prime(&remaining) {
-                factors.push(Factor::Prime(remaining));
+                final_factors.push(Factor::Prime(remaining.clone()));
             } else if self.is_composite(&remaining) {
-                factors.push(Factor::Composite(remaining));
+                final_factors.push(Factor::Composite(remaining.clone()));
             } else {
-                factors.push(Factor::Unknown(remaining));
+                final_factors.push(Factor::Unknown(remaining.clone()));
             }
         }
 
-        factors
+        // Save state if not done - check if we exhausted our budget
+        if budget == 0 && &divisor * &divisor <= remaining {
+            self.factorization_state.insert(n.clone(), (factors, remaining.clone(), divisor.clone()));
+        } else {
+            // Factorization is complete - save to complete cache and remove from state
+            self.factorization_state.remove(n);
+            self.factorization_complete.insert(n.clone(), final_factors.clone());
+        }
+
+        (final_factors, checked_up_to)
     }
 
     pub fn check(&mut self, n_str: &str) -> String {
@@ -197,17 +246,22 @@ fn prime_checker_app() -> Html {
     let input = use_state(|| String::new());
     let result = use_state(|| String::new());
     let factorization = use_state(|| Vec::<Factor>::new());
+    let checked_up_to = use_state(|| BigUint::zero());
     let checker = use_mut_ref(|| PrimeChecker::new());
 
     // Set up interval to recheck every 100ms
     {
         let result = result.clone();
+        let factorization = factorization.clone();
+        let checked_up_to = checked_up_to.clone();
         let checker = checker.clone();
         let input_clone = input.clone();
 
         use_effect(move || {
             let interval_handle = {
                 let result = result.clone();
+                let factorization = factorization.clone();
+                let checked_up_to = checked_up_to.clone();
                 let checker = checker.clone();
                 let input_clone = input_clone.clone();
 
@@ -217,6 +271,15 @@ fn prime_checker_app() -> Html {
                         let mut checker_mut = checker.borrow_mut();
                         let new_result = checker_mut.check(&input_val);
                         result.set(new_result);
+
+                        // Re-compute factorization
+                        if let Some(n) = BigUint::parse_bytes(input_val.as_bytes(), 10) {
+                            if n >= BigUint::from(2u32) {
+                                let (factors, up_to) = checker_mut.factorize(&n);
+                                factorization.set(factors);
+                                checked_up_to.set(up_to);
+                            }
+                        }
                     }
                 })
             };
@@ -230,6 +293,7 @@ fn prime_checker_app() -> Html {
         let input = input.clone();
         let result = result.clone();
         let factorization = factorization.clone();
+        let checked_up_to = checked_up_to.clone();
         let checker = checker.clone();
 
         Callback::from(move |e: InputEvent| {
@@ -245,13 +309,16 @@ fn prime_checker_app() -> Html {
             // Compute factorization
             if let Some(n) = BigUint::parse_bytes(value.as_bytes(), 10) {
                 if n >= BigUint::from(2u32) {
-                    let factors = checker_mut.factorize(&n);
+                    let (factors, up_to) = checker_mut.factorize(&n);
                     factorization.set(factors);
+                    checked_up_to.set(up_to);
                 } else {
                     factorization.set(Vec::new());
+                    checked_up_to.set(BigUint::zero());
                 }
             } else {
                 factorization.set(Vec::new());
+                checked_up_to.set(BigUint::zero());
             }
         })
     };
@@ -364,6 +431,9 @@ fn prime_checker_app() -> Html {
                             }
                         }).collect::<Html>()
                     }
+                    <div style="margin-top: 5px; font-size: 0.9em; color: #666;">
+                        { format!("(checked divisors up to {})", (*checked_up_to)) }
+                    </div>
                 </div>
             }
         </div>
