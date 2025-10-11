@@ -1,33 +1,8 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Prime Checker</title>
-</head>
-<body>
-    <div id="elm-app"></div>
-
-    <script src="elm.js"></script>
-    <script type="module">
-        const { default: init, PrimeChecker } = await import('./pkg/wasm_prime.js');
-
-        // Initialize the WASM module
-        await init();
-
-        var c = new PrimeChecker();
-
-        // Initialize Elm app
-        var app = Elm.Main.init({
-            node: document.getElementById('elm-app')
-        });
-        
-        // Set up port communication
-        app.ports.checkPrime.subscribe(function(input) {
-            var result = c.call(input);
-            
-            // Send the result back to Elm
-            app.ports.primeResult.send(result);
-        });
-    </script>
-</body>
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Prime Checker</title>
+        <link data-trunk rel="rust"/>
+    </head>
 </html>

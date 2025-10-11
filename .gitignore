@@ -8,3 +8,9 @@ wasm-pack.log
 .direnv
 elm-stuff
 elm.js
+
+# Trunk build output
+dist/
+.trunk/
+
+.direnv
