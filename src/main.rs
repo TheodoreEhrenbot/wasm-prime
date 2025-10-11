@@ -51,6 +51,19 @@ impl PrimeChecker {
         }
     }
 
+    pub fn is_probably_prime(&self, n: &BigUint) -> bool {
+        if n == &BigUint::from(2u32) || n == &BigUint::from(3u32) {
+            return true;
+        }
+        if n < &BigUint::from(2u32) || n % 2u32 == BigUint::zero() {
+            return false;
+        }
+        match self.results.get(n) {
+            Some(PrimeStatus::ProbablyPrime(tests)) if *tests >= 10 => true,
+            _ => false,
+        }
+    }
+
     pub fn check(&mut self, n_str: &str) -> String {
         let n = match BigUint::parse_bytes(n_str.as_bytes(), 10) {
             Some(n) => n,
@@ -155,14 +168,92 @@ fn prime_checker_app() -> Html {
         })
     };
 
+    // Determine if we should show prev/next buttons
+    let current_n = BigUint::parse_bytes((*input).as_bytes(), 10);
+    let checker_borrow = checker.borrow();
+
+    let show_prev = if let Some(ref n) = current_n {
+        n > &BigUint::from(2u32) && checker_borrow.is_probably_prime(n)
+    } else {
+        false
+    };
+
+    let show_next = if let Some(ref n) = current_n {
+        checker_borrow.is_probably_prime(n)
+    } else {
+        false
+    };
+
+    drop(checker_borrow);
+
+    let on_prev = {
+        let input = input.clone();
+        let checker = checker.clone();
+
+        Callback::from(move |_| {
+            if let Some(mut n) = BigUint::parse_bytes((*input).as_bytes(), 10) {
+                // Search backwards for previous prime
+                loop {
+                    if n <= BigUint::from(2u32) {
+                        break;
+                    }
+                    n -= BigUint::one();
+
+                    // Check this candidate
+                    let mut checker_mut = checker.borrow_mut();
+                    for _ in 0..10 {
+                        checker_mut.check(&n.to_string());
+                    }
+                    if checker_mut.is_probably_prime(&n) {
+                        input.set(n.to_string());
+                        break;
+                    }
+                }
+            }
+        })
+    };
+
+    let on_next = {
+        let input = input.clone();
+        let checker = checker.clone();
+
+        Callback::from(move |_| {
+            if let Some(mut n) = BigUint::parse_bytes((*input).as_bytes(), 10) {
+                // Search forwards for next prime
+                loop {
+                    n += BigUint::one();
+
+                    // Check this candidate
+                    let mut checker_mut = checker.borrow_mut();
+                    for _ in 0..10 {
+                        checker_mut.check(&n.to_string());
+                    }
+                    if checker_mut.is_probably_prime(&n) {
+                        input.set(n.to_string());
+                        break;
+                    }
+                }
+            }
+        })
+    };
+
     html! {
         <div>
-            <input
-                type="text"
-                placeholder="Enter a number"
-                value={(*input).clone()}
-                oninput={on_input}
-            />
+            <div style="display: flex; gap: 10px; align-items: center;">
+                if show_prev {
+                    <button onclick={on_prev}>{ "← Previous Prime" }</button>
+                }
+                <input
+                    type="text"
+                    placeholder="Enter a number"
+                    value={(*input).clone()}
+                    oninput={on_input}
+                    style="flex: 1;"
+                />
+                if show_next {
+                    <button onclick={on_next}>{ "Next Prime →" }</button>
+                }
+            </div>
             <div>{ (*result).clone() }</div>
         </div>
     }
