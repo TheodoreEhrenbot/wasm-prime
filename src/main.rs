@@ -1,14 +1,43 @@
 use gloo_timers::callback::Interval;
-use num_bigint::BigUint;
-use num_iter::range;
+use num_bigint::{BigUint, RandBigInt};
+use num_traits::{One, Zero};
+use rand::thread_rng;
 use std::collections::HashMap;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
+// Miller-Rabin primality test
+fn miller_rabin_test(n: &BigUint, a: &BigUint) -> bool {
+    // Write n-1 as 2^r * d
+    let n_minus_1 = n - BigUint::one();
+    let mut d = n_minus_1.clone();
+    let mut r = 0u32;
+
+    while &d % 2u32 == BigUint::zero() {
+        d /= 2u32;
+        r += 1;
+    }
+
+    // Compute a^d mod n
+    let mut x = a.modpow(&d, n);
+
+    if x == BigUint::one() || x == n_minus_1 {
+        return true;
+    }
+
+    for _ in 0..r-1 {
+        x = x.modpow(&BigUint::from(2u32), n);
+        if x == n_minus_1 {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub enum PrimeStatus {
-    Prime,
     Composite,
-    CheckedUntil(BigUint),
+    ProbablyPrime(usize), // Number of Miller-Rabin tests passed
 }
 
 pub struct PrimeChecker {
@@ -28,40 +57,46 @@ impl PrimeChecker {
             None => return "Please enter a natural number".to_string(),
         };
 
-        if n == BigUint::from(0_u32) || n == BigUint::from(1_u32) {
+        if n == BigUint::zero() || n == BigUint::one() {
             self.results.insert(n, PrimeStatus::Composite);
             return "Input should be at least 2".to_string();
         }
 
-        // Check if we've already computed this or have partial results
-        let start = match self.results.get(&n) {
-            Some(PrimeStatus::Prime) => return "prime".to_string(),
+        if n == BigUint::from(2u32) {
+            return "prime (probability: 1.0)".to_string();
+        }
+
+        // Check if even
+        if &n % 2u32 == BigUint::zero() {
+            self.results.insert(n, PrimeStatus::Composite);
+            return "composite".to_string();
+        }
+
+        // Check existing status
+        let current_tests = match self.results.get(&n) {
             Some(PrimeStatus::Composite) => return "composite".to_string(),
-            Some(PrimeStatus::CheckedUntil(k)) => k + BigUint::from(1_u32),
-            None => BigUint::from(2_u32),
+            Some(PrimeStatus::ProbablyPrime(tests)) => *tests,
+            None => 0,
         };
 
-        let budget = BigUint::from(1_000_000_u64);
+        // Run one more Miller-Rabin test
+        let mut rng = thread_rng();
+        let a = rng.gen_biguint_range(&BigUint::from(2u32), &(&n - BigUint::one()));
 
-        let end = std::cmp::min(&start + budget, n.clone());
-
-        for i in range(start, end.clone()) {
-            if &n % i == BigUint::ZERO {
-                self.results.insert(n, PrimeStatus::Composite);
-                return "composite".to_string();
-            }
+        if !miller_rabin_test(&n, &a) {
+            self.results.insert(n, PrimeStatus::Composite);
+            return "composite".to_string();
         }
 
-        // Update status based on how far we checked
-        if end == n {
-            // We've checked all possible divisors, it's prime
-            self.results.insert(n, PrimeStatus::Prime);
-            "prime".to_string()
-        } else {
-            // We've checked up to 'end', but not all divisors
-            self.results.insert(n, PrimeStatus::CheckedUntil(end));
-            "computing...".to_string()
-        }
+        // Passed another test
+        let new_tests = current_tests + 1;
+        self.results.insert(n.clone(), PrimeStatus::ProbablyPrime(new_tests));
+
+        // Probability of being composite after k tests is at most (1/4)^k
+        let prob_composite = 0.25_f64.powi(new_tests as i32);
+        let prob_prime = 1.0 - prob_composite;
+
+        format!("prime (probability: {:.10})", prob_prime)
     }
 }
 
@@ -124,4 +159,56 @@ fn prime_checker_app() -> Html {
 
 fn main() {
     yew::Renderer::<PrimeCheckerApp>::new().render();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Naive trial division to check primality (for testing)
+    fn is_prime_naive(n: u64) -> bool {
+        if n < 2 {
+            return false;
+        }
+        if n == 2 {
+            return true;
+        }
+        if n % 2 == 0 {
+            return false;
+        }
+        let limit = (n as f64).sqrt() as u64 + 1;
+        for i in (3..=limit).step_by(2) {
+            if n % i == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn test_miller_rabin_1_to_10000() {
+        let mut checker = PrimeChecker::new();
+
+        for n in 1..=10000 {
+            let n_str = n.to_string();
+            let expected_prime = is_prime_naive(n);
+
+            // Run multiple checks to get high confidence
+            for _ in 0..20 {
+                let result = checker.check(&n_str);
+
+                // If we get composite, check it matches expected
+                if result == "composite" || result == "Input should be at least 2" {
+                    assert!(!expected_prime, "Number {} is prime but Miller-Rabin said composite", n);
+                    break;
+                }
+            }
+
+            // After 20 tests, if it's still saying probably prime, it should actually be prime
+            let final_result = checker.check(&n_str);
+            if final_result.starts_with("prime") {
+                assert!(expected_prime, "Number {} is composite but Miller-Rabin said prime", n);
+            }
+        }
+    }
 }

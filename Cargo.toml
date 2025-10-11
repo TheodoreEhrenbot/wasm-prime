@@ -7,9 +7,11 @@ edition = "2021"
 [dependencies]
 yew = { version = "0.21.0", features = ["csr"] }
 web-sys = "0.3.77"
-num-bigint = "0.4.6"
+num-bigint = { version = "0.4.6", features = ["rand"] }
 num-iter = "0.1.45"
+num-traits = "0.2"
 gloo-timers = "0.3.0"
+rand = "0.8"
 
 [profile.release]
 # Tell `rustc` to optimize for small code size.
