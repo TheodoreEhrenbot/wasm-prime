@@ -62,7 +62,7 @@ impl PrimeChecker {
             return "Input should be at least 2".to_string();
         }
 
-        if n == BigUint::from(2u32) {
+        if n == BigUint::from(2u32) || n == BigUint::from(3u32) {
             return "prime (probability: 1.0)".to_string();
         }
 
@@ -81,7 +81,12 @@ impl PrimeChecker {
 
         // Run one more Miller-Rabin test
         let mut rng = thread_rng();
-        let a = rng.gen_biguint_range(&BigUint::from(2u32), &(&n - BigUint::one()));
+        let upper_bound = &n - BigUint::one();
+        let lower_bound = BigUint::from(2u32);
+
+        // For n=3, upper_bound=2, so range [2,2) is invalid. Already handled above.
+        // For n>=5, this should be fine
+        let a = rng.gen_biguint_range(&lower_bound, &upper_bound);
 
         if !miller_rabin_test(&n, &a) {
             self.results.insert(n, PrimeStatus::Composite);
