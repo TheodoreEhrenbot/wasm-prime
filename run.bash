@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-trunk serve
+trunk serve --release
