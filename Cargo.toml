@@ -5,7 +5,7 @@ authors = ["Theodore Ehrenborg <theodore.ehrenborg@gmail.com>"]
 edition = "2021"
 
 [dependencies]
-yew = { version = "0.21.0", features = ["csr"] }
+yew = { version = "0.22.1", features = ["csr"] }
 web-sys = "0.3.77"
 num-bigint = { version = "0.4.6", features = ["rand"] }
 num-iter = "0.1.45"
