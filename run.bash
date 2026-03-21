@@ -1,2 +1,4 @@
 #!/usr/bin/env bash
-trunk serve --release
+set -e
+./build.bash
+python3 -m http.server

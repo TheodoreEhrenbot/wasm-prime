@@ -1,20 +1,15 @@
 name: Build and Deploy
 
-
 on:
-  # Runs on pushes to the main branch
   push:
     branches: [ "main" ]
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN for GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment
 concurrency:
   group: "pages"
   cancel-in-progress: true
@@ -29,21 +24,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - uses: jetli/trunk-action@v0.5.0
+      - uses: jetli/wasm-pack-action@v0.4.0
         with:
-          version: 'v0.21.13'
+          version: v0.13.1
 
-      - name: Add target
-        run: |
-          rustup target add wasm32-unknown-unknown
+      - uses: jorelali/setup-elm@v6
+        with:
+          elm-version: 0.19.1
 
       - name: Build project
-        run: |
-          trunk build
+        run: ./build.bash
 
       - name: Setup Pages artifact
         run: |
-          cp -r dist _site
+          mkdir -p _site
+          cp -r pkg _site/
+          cp index.html _site/
+          cp elm.js _site/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

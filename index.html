@@ -1,8 +1,62 @@
-<!doctype html>
-<html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Prime Checker</title>
-        <link data-trunk rel="rust"/>
-    </head>
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Prime Checker &amp; Factorizer</title>
+</head>
+<body>
+    <div id="elm-app"></div>
+
+    <script src="elm.js"></script>
+    <script type="module">
+        const { default: init, Checker } = await import('./pkg/wasm_prime.js');
+        await init();
+
+        const checker = new Checker();
+
+        const app = Elm.Main.init({ node: document.getElementById('elm-app') });
+
+        // --- Main query port: Rust does all the work, returns JSON ---
+        app.ports.query.subscribe(function(input) {
+            const result = checker.query(input);
+            app.ports.queryResult.send(result);
+        });
+
+        // --- Next prime: search upward from n+1 ---
+        app.ports.findNextPrime.subscribe(function(input) {
+            let n;
+            try { n = BigInt(input); } catch(e) { return; }
+            if (n < 2n) { app.ports.nextPrimeFound.send("2"); return; }
+            let candidate = n + 1n;
+            if (candidate > 2n && candidate % 2n === 0n) candidate += 1n;
+            for (let i = 0; i < 100000; i++) {
+                if (checker.is_probably_prime(candidate.toString())) {
+                    app.ports.nextPrimeFound.send(candidate.toString());
+                    return;
+                }
+                candidate += candidate === 2n ? 1n : 2n;
+            }
+            app.ports.nextPrimeFound.send(candidate.toString());
+        });
+
+        // --- Previous prime: search downward from n-1 ---
+        app.ports.findPrevPrime.subscribe(function(input) {
+            let n;
+            try { n = BigInt(input); } catch(e) { return; }
+            if (n <= 2n) return;
+            let candidate = n - 1n;
+            if (candidate > 2n && candidate % 2n === 0n) candidate -= 1n;
+            for (let i = 0; i < 100000; i++) {
+                if (candidate < 2n) break;
+                if (checker.is_probably_prime(candidate.toString())) {
+                    app.ports.prevPrimeFound.send(candidate.toString());
+                    return;
+                }
+                if (candidate === 2n) break;
+                candidate -= 2n;
+            }
+        });
+    </script>
+</body>
 </html>
