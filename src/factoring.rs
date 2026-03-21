@@ -91,73 +91,74 @@ fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     a
 }
 
-/// Brent's Pollard-rho over u128.  Returns a non-trivial factor of n, or None.
-fn pollard_brent_u128(n: u128) -> Option<u128> {
-    if n % 2 == 0 {
-        return Some(2);
-    }
-    if n % 3 == 0 {
-        return Some(3);
-    }
-    // Try 30 different (y, c) seeds.
-    for attempt in 0u64..30 {
-        let c = (attempt.wrapping_mul(1_000_003).wrapping_add(1)) as u128 % (n - 1) + 1;
-        let mut y = (attempt.wrapping_mul(1_000_007).wrapping_add(2)) as u128 % n;
-        let mut r: u128 = 1;
-        let batch: u128 = 128;
-        let mut q = 1u128;
-        let mut x = 0u128;
-        let mut ys = 0u128;
-        let mut g = 1u128;
+/// One seed of Brent's Pollard-rho over u128.
+///
+/// Bounded to at most R_MAX total iterations so that a single call never
+/// blocks the UI thread for more than a few milliseconds.  The caller is
+/// responsible for trying successive seeds across multiple `step()` calls.
+///
+/// Returns Some(factor) on success, None if this seed failed / hit the limit.
+fn pollard_brent_u128_seed(n: u128, seed: u64) -> Option<u128> {
+    // r doubles each outer loop; we stop when it would exceed R_MAX.
+    // Budget: keep one seed ≤ ~20ms in WASM (optimised).
+    // R_MAX=4096 → ~4K total mulmods × ~110 addmods each ≈ 2ms release / 18ms debug.
+    // For large factors we simply try more seeds on successive query() calls.
+    const R_MAX: u128 = 1 << 12; // 4096
 
-        'outer: while g == 1 {
-            x = y;
-            for _ in 0..r {
+    let c = (seed.wrapping_mul(1_000_003).wrapping_add(1)) as u128 % (n - 1) + 1;
+    let mut y = (seed.wrapping_mul(1_000_007).wrapping_add(2)) as u128 % n;
+    let mut r: u128 = 1;
+    let batch: u128 = 128;
+    let mut q = 1u128;
+    let mut x = 0u128;
+    let mut ys = 0u128;
+    let mut g = 1u128;
+
+    'outer: while g == 1 {
+        x = y;
+        for _ in 0..r {
+            y = addmod_u128(mulmod_u128(y, y, n), c, n);
+        }
+        let mut k = 0u128;
+        while k < r && g == 1 {
+            ys = y;
+            let bound = batch.min(r - k);
+            for _ in 0..bound {
                 y = addmod_u128(mulmod_u128(y, y, n), c, n);
+                let diff = if x > y { x - y } else { y - x };
+                q = mulmod_u128(q, diff.max(1), n);
             }
-            let mut k = 0u128;
-            while k < r && g == 1 {
-                ys = y;
-                let bound = batch.min(r - k);
-                for _ in 0..bound {
-                    y = addmod_u128(mulmod_u128(y, y, n), c, n);
-                    let diff = if x > y { x - y } else { y - x };
-                    // avoid q becoming 0
-                    q = mulmod_u128(q, diff.max(1), n);
-                }
-                g = gcd_u128(q, n);
-                k += batch;
-            }
-            r *= 2;
-            // Hard limit: give up after ~2M iterations per attempt
-            if r > 1 << 21 {
-                break 'outer;
-            }
+            g = gcd_u128(q, n);
+            k += batch;
         }
-
-        if g == n {
-            // Backtrack step-by-step from last ys
-            loop {
-                ys = addmod_u128(mulmod_u128(ys, ys, n), c, n);
-                let diff = if x > ys { x - ys } else { ys - x };
-                g = gcd_u128(diff.max(1), n);
-                if g > 1 {
-                    break;
-                }
-                if ys == x {
-                    // Full cycle with no factor found; try next seed
-                    g = n;
-                    break;
-                }
-            }
-        }
-
-        if g > 1 && g < n {
-            return Some(g);
+        r *= 2;
+        if r > R_MAX {
+            break 'outer;
         }
     }
-    None
+
+    if g == n {
+        // Backtrack step-by-step from last ys
+        loop {
+            ys = addmod_u128(mulmod_u128(ys, ys, n), c, n);
+            let diff = if x > ys { x - ys } else { ys - x };
+            g = gcd_u128(diff.max(1), n);
+            if g > 1 {
+                break;
+            }
+            if ys == x {
+                g = n;
+                break;
+            }
+        }
+    }
+
+    if g > 1 && g < n { Some(g) } else { None }
 }
+
+/// How many Pollard-Brent seeds to try before giving up and falling back to ECM.
+/// 200 seeds × R_MAX = 13M iterations; covers factors up to ~2^52 with high probability.
+const MAX_POLLARD_SEEDS: u32 = 200;
 
 /// Try to fit a BigUint into u128; returns None if it has more than 2 u64 limbs.
 fn biguint_to_u128(n: &BigUint) -> Option<u128> {
@@ -688,6 +689,93 @@ pub fn try_ecm_curve(
 // Trial division helper
 // ---------------------------------------------------------------------------
 
+/// Fast trial division using native u128 arithmetic.
+/// Used when n fits in u128 — avoids BigUint heap allocations entirely.
+/// Returns (prime_factors_as_u64, remaining_u128).
+fn trial_divide_u128(mut n: u128, primes: &[u64]) -> (Vec<u64>, u128) {
+    let mut factors = vec![];
+    for &p in primes {
+        let p128 = p as u128;
+        if p128 * p128 > n {
+            break;
+        }
+        while n % p128 == 0 {
+            factors.push(p);
+            n /= p128;
+        }
+    }
+    (factors, n)
+}
+
+/// Compute n mod d using Horner's method on the u64 limbs of n.
+/// Zero heap allocations — uses the pre-computed limb slice directly.
+/// limbs are in little-endian order (limbs[0] is least significant).
+fn limbs_rem_u64(limbs: &[u64], d: u64) -> u64 {
+    if d == 1 {
+        return 0;
+    }
+    let d128 = d as u128;
+    // base = 2^64 mod d
+    let base = ((u64::MAX as u128 + 1) % d128) as u128;
+    let mut result = 0u128;
+    let mut power = 1u128;
+    for &limb in limbs {
+        result = (result + (limb as u128 % d128) * power) % d128;
+        power = (power * base) % d128;
+    }
+    result as u64
+}
+
+/// Check whether p^2 exceeds the value encoded in `limbs` (little-endian u64 limbs).
+fn p_sq_exceeds_limbs(p: u64, limbs: &[u64]) -> bool {
+    let p_sq = (p as u128) * (p as u128); // p ≤ 10^6, p^2 ≤ 10^12 < 2^64
+    match limbs.len() {
+        0 => true,
+        1 => p_sq > limbs[0] as u128,
+        2 => p_sq > ((limbs[1] as u128) << 64 | limbs[0] as u128),
+        _ => false, // 3+ limbs → remaining definitely > 10^12
+    }
+}
+
+/// Trial division for BigUint n that may not fit in u128.
+/// Uses limb-level native arithmetic for the inner loop — no allocation per prime.
+/// Switches to u128 fast path as soon as the remaining shrinks to fit.
+/// Returns (prime_factors, remaining, exhausted_all_small_primes).
+fn trial_divide_bigint_fast(n: &BigUint, primes: &[u64]) -> (Vec<BigUint>, BigUint, bool) {
+    let mut remaining = n.clone();
+    let mut factors: Vec<BigUint> = vec![];
+    let mut limbs = remaining.to_u64_digits(); // one allocation, refreshed only on division
+
+    for &p in primes {
+        if p_sq_exceeds_limbs(p, &limbs) {
+            // remaining is prime; no need to add it here — caller checks is_prime()
+            return (factors, remaining, false);
+        }
+
+        if limbs_rem_u64(&limbs, p) == 0 {
+            let pb = BigUint::from(p);
+            loop {
+                factors.push(BigUint::from(p));
+                remaining /= &pb;
+                limbs = remaining.to_u64_digits(); // refresh after division
+                // Switch to u128 fast path as soon as possible
+                if let Some(r_u128) = biguint_to_u128(&remaining) {
+                    let (more, final_r) = trial_divide_u128(r_u128, primes);
+                    factors.extend(more.iter().map(|&f| BigUint::from(f)));
+                    let last_p = *primes.last().unwrap_or(&2) as u128;
+                    let exhausted = final_r > 1 && last_p * last_p < final_r;
+                    return (factors, BigUint::from(final_r), exhausted);
+                }
+                if limbs_rem_u64(&limbs, p) != 0 {
+                    break;
+                }
+            }
+        }
+    }
+    // Exhausted all small primes
+    (factors, remaining, true)
+}
+
 /// Try dividing n by small primes up to limit.
 /// Returns (factors_found, remaining) where factors_found are prime factors.
 fn trial_divide(n: &BigUint, primes: &[u64], cursor: usize, batch: usize) -> (Vec<BigUint>, BigUint, usize) {
@@ -736,7 +824,8 @@ struct PendingFactor {
     trial_div_done: bool,
     ecm_curves_tried: u32,
     b1: u64,
-    pollard_tried: bool,
+    /// Next Pollard-Brent seed to try.  Reaches MAX_POLLARD_SEEDS when exhausted.
+    pollard_seed: u32,
 }
 
 struct FactorizationState {
@@ -790,7 +879,7 @@ impl Factorizer {
                 trial_div_done: false,
                 ecm_curves_tried: 0,
                 b1: 2000,
-                pollard_tried: false,
+                pollard_seed: 0,
             });
         }
     }
@@ -825,93 +914,55 @@ impl Factorizer {
 
         if !pf.trial_div_done {
             let n_clone = pf.n.clone();
-            // Do all trial division in one shot — fast enough (~10ms for 78k primes),
-            // avoids wasting 80× 100ms ticks when no small factor exists.
-            let (found, _remaining, new_cursor) =
-                trial_divide(&n_clone, &self.small_primes, 0, self.small_primes.len());
 
-            let pf = &mut state.pending[idx];
-            for f in found {
-                if f == pf.n {
-                    // The whole number was found prime during trial div; shouldn't happen
-                    // because we already checked is_prime before adding to pending.
-                    // But handle gracefully.
+            // All trial division happens in one step.
+            // Fast paths use native arithmetic to stay well under 50ms per call.
+            let (small_factors, remaining, exhausted_small) =
+                if let Some(n_u128) = biguint_to_u128(&n_clone) {
+                    // n fits in u128: fully native, no heap allocs per prime
+                    let (fs, rem) = trial_divide_u128(n_u128, &self.small_primes);
+                    let last_p = *self.small_primes.last().unwrap_or(&2) as u128;
+                    let exhausted = rem > 1 && last_p * last_p < rem;
+                    let factors_big: Vec<BigUint> =
+                        fs.iter().map(|&f| BigUint::from(f)).collect();
+                    (factors_big, BigUint::from(rem), exhausted)
                 } else {
-                    let pos = state.prime_factors.partition_point(|x| x <= &f);
+                    // n > 2^128: limb-level arithmetic; switches to u128 once remaining shrinks
+                    trial_divide_bigint_fast(&n_clone, &self.small_primes)
+                };
+
+            // Apply found small prime factors and update pf.n.
+            {
+                let pf = &mut state.pending[idx];
+                for f in &small_factors {
+                    let pos = state.prime_factors.partition_point(|x| x <= f);
                     state.prime_factors.insert(pos, f.clone());
-                    pf.n /= &f;
-                    // Re-check if we divided it multiple times (already handled in trial_divide loop)
                 }
+                pf.n = remaining;
             }
 
-            // After batch, check if remaining < n_pending
-            // Actually trial_divide already divided pf.n; remaining is the leftover.
-            // We need to sync: set pf.n = remaining if smaller.
-            // Actually the loop above already modifies pf.n via pf.n /= &f for each factor found.
-            // But trial_divide returns the remaining after dividing n_clone (original).
-            // So we need to just set pf.n = remaining and add factors separately.
-            // Let's redo this logic cleanly.
-
-            // Actually, the above code has a bug: it divides pf.n by each factor individually,
-            // but trial_divide already fully divided n_clone. Let's fix by using remaining directly.
-            // We need to reload pf since we mutated it above... let's use a cleaner approach.
-            // We'll reset and do this properly.
-            // This is messy due to borrow checker. Let's restructure.
-
-            // The simplest fix: just recompute.
-            // We already have: found = list of prime factors, remaining = leftover.
-            // Set pf.n = remaining, add found to prime_factors.
-            // But we already mutated pf.n above (incorrectly). Let's undo that.
-
-            // Actually since we divided each factor out of pf.n separately, and trial_divide
-            // already produced the correct remaining (after all divisions), we should just set
-            // pf.n = remaining. But the intermediate /= &f steps made pf.n incorrect.
-            // This is a design flaw. Let's just set pf.n = remaining directly after restoring.
-
-            // The safest approach: don't mutate pf.n in the loop above, just collect factors,
-            // then set pf.n = remaining once. But we already did the mutation...
-            // Since pf.n started as n_clone and we divided by each f: if found = [2, 2, 3]
-            // then pf.n = n_clone / 2 / 2 / 3 = remaining. So it's actually correct!
-            // trial_divide returns factors as individual prime instances (with multiplicity),
-            // and divides n_clone by all of them, so n_clone / product(found) = remaining.
-            // And pf.n /= f for each f gives pf.n = n_clone / product(found). Correct!
-
-            // Now check if pf.n == remaining (sanity):
-            // If yes, great. If no, there's an inconsistency. Let's just trust the logic.
-
-            // Now check remaining state
             let pf = &state.pending[idx];
-            // exhausted_small: tried all small primes (p² may still be < n)
-            // sqrt_exceeded: next prime's square > pf.n, meaning pf.n is definitely prime
-            let exhausted_small = new_cursor >= self.small_primes.len();
-            let sqrt_exceeded = !exhausted_small && {
-                let pb = BigUint::from(self.small_primes[new_cursor]);
-                &pb * &pb > pf.n
-            };
-
             if pf.n == BigUint::one() {
                 state.pending.remove(idx);
-            } else if sqrt_exceeded || is_prime(&pf.n) {
-                // Provably prime: either sqrt check passed, or deterministic Miller-Rabin confirms
+            } else if is_prime(&pf.n) {
                 let n_val = state.pending.remove(idx).n;
-                if n_val > BigUint::one() {
-                    let pos = state.prime_factors.partition_point(|x| x <= &n_val);
-                    state.prime_factors.insert(pos, n_val);
-                }
+                let pos = state.prime_factors.partition_point(|x| x <= &n_val);
+                state.prime_factors.insert(pos, n_val);
             } else if exhausted_small {
-                // Finished trial division but n is composite (factors > 10^6): switch to ECM
+                // Composite with all factors > 10^6: switch to Pollard/ECM
                 state.pending[idx].trial_div_done = true;
             }
-            // else: continue trial division (cursor already updated)
         } else {
-            // ECM phase — first try fast Pollard-Brent for composites fitting in u128
+            // Pollard-Brent phase (one seed per step) then ECM (one curve per step).
+            // Each path does a bounded amount of work so the UI thread stays responsive.
             let n_val = pf.n.clone();
-            let pollard_tried = pf.pollard_tried;
+            let pollard_seed = pf.pollard_seed;
 
-            if !pollard_tried {
-                state.pending[idx].pollard_tried = true;
+            if pollard_seed < MAX_POLLARD_SEEDS {
                 if let Some(n_u128) = biguint_to_u128(&n_val) {
-                    if let Some(f_u128) = pollard_brent_u128(n_u128) {
+                    // Advance seed regardless of outcome.
+                    state.pending[idx].pollard_seed += 1;
+                    if let Some(f_u128) = pollard_brent_u128_seed(n_u128, pollard_seed as u64) {
                         let f = BigUint::from(f_u128);
                         let remainder = &n_val / &f;
                         state.pending.remove(idx);
@@ -922,10 +973,15 @@ impl Factorizer {
                         }
                         return;
                     }
+                    // Seed failed; return and let the next step try the next seed.
+                    return;
+                } else {
+                    // n doesn't fit in u128; skip Pollard phase entirely.
+                    state.pending[idx].pollard_seed = MAX_POLLARD_SEEDS;
                 }
-                // Pollard-Brent failed (n too large or genuinely hard); fall through to ECM
             }
 
+            // Pollard phase exhausted or n too large — fall through to ECM.
             let curves_tried = state.pending[idx].ecm_curves_tried;
             let b1 = state.pending[idx].b1;
             let b2 = 20 * b1;

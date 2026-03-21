@@ -766,4 +766,64 @@ mod tests {
         assert!(!checker.is_probably_prime("9"));
         assert!(!checker.is_probably_prime("100"));
     }
+
+    // ---------------------------------------------------------------------------
+    // Responsiveness tests
+    //
+    // Elm calls query() at most once every 100 ms.  A single query() call that
+    // blocks for longer than ~100 ms will freeze the browser.  These tests
+    // simulate the Elm interaction model correctly: they measure the wall-clock
+    // time of INDIVIDUAL query() calls (not the total time to complete factoring).
+    // ---------------------------------------------------------------------------
+
+    /// Time a single query() call.  Panics if it exceeds `budget_ms`.
+    fn assert_single_call_fast(n: &str, budget_ms: u64) {
+        use std::time::Instant;
+        let mut checker = CheckerInner::new();
+        // The very first call may do trial division (fast) or start Pollard/ECM.
+        // Check a few calls to catch slow ones mid-factoring as well.
+        for _ in 0..5 {
+            let t = Instant::now();
+            checker.query(n);
+            let ms = t.elapsed().as_millis() as u64;
+            assert!(
+                ms <= budget_ms,
+                "query({}) took {}ms, budget {}ms — UI would freeze",
+                n, ms, budget_ms
+            );
+        }
+    }
+
+    #[test]
+    fn test_responsiveness_large_with_small_factors() {
+        // = 7 × 43 × 25301 × 2964807793319969 × 546782985124176271
+        // Previously froze browser for 10+ s due to unbounded Pollard-Brent.
+        assert_single_call_fast("12345699943999999909990999999999999999999", 200);
+    }
+
+    #[test]
+    fn test_responsiveness_repunit_39() {
+        // 39-digit repunit; previously caused "page unresponsive" warning.
+        assert_single_call_fast("111111111111111111111111111111111111111", 200);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_responsiveness_release_tighter_budget() {
+        // In release mode the budget is tighter — should be well under 50ms.
+        use std::time::Instant;
+        let cases = [
+            "12345699943999999909990999999999999999999",
+            "111111111111111111111111111111111111111",
+        ];
+        let mut checker = CheckerInner::new();
+        for n in &cases {
+            for _ in 0..3 {
+                let t = Instant::now();
+                checker.query(n);
+                let ms = t.elapsed().as_millis() as u64;
+                assert!(ms <= 50, "query({}) took {}ms in release mode", n, ms);
+            }
+        }
+    }
 }
