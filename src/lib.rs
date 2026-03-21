@@ -159,7 +159,6 @@ fn json_escape(s: &str) -> String {
 ///     {"value": "<decimal>", "exp": <int>, "is_prime": true},
 ///     ...
 ///   ],
-///   "pending_factor_count": <int>
 /// }
 ///
 /// Or on bad input:
@@ -169,7 +168,7 @@ fn build_json(
     probability: f64,
     factoring: &FactoringStatus,
 ) -> String {
-    let factors_json: Vec<String> = factoring
+    let mut all_factors: Vec<String> = factoring
         .prime_factors
         .iter()
         .map(|(val, exp)| {
@@ -181,13 +180,19 @@ fn build_json(
         })
         .collect();
 
+    for val in &factoring.pending_values {
+        all_factors.push(format!(
+            r#"{{"value":"{}","exp":1,"is_prime":false}}"#,
+            json_escape(&val.to_string())
+        ));
+    }
+
     format!(
-        r#"{{"primality":"{}","probability":{:.15},"factors_complete":{},"factors":[{}],"pending_factor_count":{}}}"#,
+        r#"{{"primality":"{}","probability":{:.15},"factors_complete":{},"factors":[{}]}}"#,
         primality,
         probability,
         factoring.complete,
-        factors_json.join(","),
-        factoring.pending_count,
+        all_factors.join(","),
     )
 }
 
@@ -302,10 +307,10 @@ mod tests {
     // Test helpers
     // ---------------------------------------------------------------------------
 
-    /// Parse a JSON query result. Returns (primality, probability, factors_complete, factors, pending_count)
-    /// factors: Vec<(value_str, exp, is_prime)>
+    /// Parse a JSON query result. Returns (primality, probability, factors_complete, factors).
+    /// factors: Vec<(value_str, exp)> — includes both prime and composite (pending) factors.
     /// Panics if the result has an "error" key.
-    fn parse_result(json: &str) -> (String, f64, bool, Vec<(String, usize)>, usize) {
+    fn parse_result(json: &str) -> (String, f64, bool, Vec<(String, usize)>) {
         assert!(
             !json.contains("\"error\""),
             "Got error JSON: {}",
@@ -314,11 +319,8 @@ mod tests {
         let primality = extract_str(json, "primality");
         let probability = extract_f64(json, "probability");
         let factors_complete = json.contains("\"factors_complete\":true");
-        let pending_count = extract_usize(json, "pending_factor_count");
-
-        // Parse factors array
         let factors = parse_factors_array(json);
-        (primality, probability, factors_complete, factors, pending_count)
+        (primality, probability, factors_complete, factors)
     }
 
     fn extract_str(json: &str, key: &str) -> String {
@@ -336,14 +338,6 @@ mod tests {
         let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.' && c != 'e' && c != '-' && c != '+')
             .unwrap_or(rest.len());
         rest[..end].parse().expect("f64")
-    }
-
-    fn extract_usize(json: &str, key: &str) -> usize {
-        let search = format!("\"{}\":", key);
-        let start = json.find(&search).expect(&format!("key {} not found", key)) + search.len();
-        let rest = &json[start..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        rest[..end].parse().expect("usize")
     }
 
     fn parse_factors_array(json: &str) -> Vec<(String, usize)> {
@@ -415,19 +409,18 @@ mod tests {
             c.query("7");
         }
         let json = c.query("7");
-        let (primality, prob, complete, factors, pending) = parse_result(&json);
+        let (primality, prob, complete, factors) = parse_result(&json);
         assert_eq!(primality, "prime");
         assert!((prob - 1.0).abs() < 1e-9);
         assert!(complete);
         assert_eq!(factors, vec![("7".to_string(), 1)]);
-        assert_eq!(pending, 0);
     }
 
     #[test]
     fn test_json_structure_composite() {
         let mut c = CheckerInner::new();
         let json = c.query("12");
-        let (primality, _prob, _complete, _factors, _pending) = parse_result(&json);
+        let (primality, _prob, _complete, _factors) = parse_result(&json);
         assert_eq!(primality, "composite");
     }
 
@@ -461,7 +454,7 @@ mod tests {
                 c.query(&p.to_string());
             }
             let json = c.query(&p.to_string());
-            let (primality, _, _, _, _) = parse_result(&json);
+            let (primality, _, _, _) = parse_result(&json);
             assert!(
                 primality == "prime" || primality == "probably_prime",
                 "{} should be prime, got {}",
@@ -477,7 +470,7 @@ mod tests {
         for &n in &composites {
             let mut c = CheckerInner::new();
             let json = c.query(&n.to_string());
-            let (primality, _, _, _, _) = parse_result(&json);
+            let (primality, _, _, _) = parse_result(&json);
             assert_eq!(primality, "composite", "{} should be composite", n);
         }
     }
@@ -489,7 +482,7 @@ mod tests {
             c.query("1000000007");
         }
         let json = c.query("1000000007");
-        let (primality, _, _, _, _) = parse_result(&json);
+        let (primality, _, _, _) = parse_result(&json);
         assert!(primality == "prime", "10^9+7 should be prime, got {}", primality);
     }
 
@@ -532,8 +525,7 @@ mod tests {
             n,
             json
         );
-        let (_, _, _, factors, pending) = parse_result(json);
-        assert_eq!(pending, 0, "No pending for {}", n);
+        let (_, _, _, factors) = parse_result(json);
         let product = factor_product(&factors);
         assert_eq!(
             product,
@@ -562,7 +554,7 @@ mod tests {
         for &(n, expected) in cases {
             let json = query_to_completion(&mut checker, &n.to_string(), 500);
             verify_factoring_json(n, &json);
-            let (_, _, _, factors, _) = parse_result(&json);
+            let (_, _, _, factors) = parse_result(&json);
             let expected_str: Vec<(String, usize)> = expected
                 .iter()
                 .map(|(v, e)| (v.to_string(), *e))
@@ -577,7 +569,7 @@ mod tests {
         for &p in &[2u64, 3, 5, 7, 97, 997, 9973, 99991] {
             let json = query_to_completion(&mut checker, &p.to_string(), 200);
             verify_factoring_json(p, &json);
-            let (_, _, _, factors, _) = parse_result(&json);
+            let (_, _, _, factors) = parse_result(&json);
             assert_eq!(factors, vec![(p.to_string(), 1)], "Prime {} factors to itself", p);
         }
     }
@@ -606,7 +598,7 @@ mod tests {
             "Should factor large semiprime: {}",
             json
         );
-        let (_, _, _, factors, _) = parse_result(&json);
+        let (_, _, _, factors) = parse_result(&json);
         let product = factor_product(&factors);
         assert_eq!(product, n, "Factor product should equal original");
     }
@@ -619,7 +611,7 @@ mod tests {
     fn test_elm_simulation_prime() {
         let (json, _steps) = simulate_elm_ticks("9999999967", 500);
         assert!(json.contains("\"factors_complete\":true"), "Should complete: {}", json);
-        let (primality, _, _, factors, _) = parse_result(&json);
+        let (primality, _, _, factors) = parse_result(&json);
         assert!(primality == "prime" || primality == "probably_prime");
         assert_eq!(factors, vec![("9999999967".to_string(), 1)]);
     }
@@ -628,7 +620,7 @@ mod tests {
     fn test_elm_simulation_composite() {
         let (json, _steps) = simulate_elm_ticks("123456789", 500);
         assert!(json.contains("\"factors_complete\":true"));
-        let (primality, _, _, factors, _) = parse_result(&json);
+        let (primality, _, _, factors) = parse_result(&json);
         assert_eq!(primality, "composite");
         let product = factor_product(&factors);
         assert_eq!(product, BigUint::from(123456789u64));
@@ -720,7 +712,7 @@ mod tests {
         let mut checker = CheckerInner::new();
         let json = query_to_completion(&mut checker, &n.to_string(), 500);
         verify_factoring_json(n, &json);
-        let (_, _, _, factors, _) = parse_result(&json);
+        let (_, _, _, factors) = parse_result(&json);
         let two_exp = factors.iter().find(|(v, _)| v == "2").map(|(_, e)| *e).unwrap_or(0);
         assert_eq!(two_exp, 10);
     }

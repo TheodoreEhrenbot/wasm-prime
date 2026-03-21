@@ -51,6 +51,125 @@ fn extended_gcd_biguint(a: &BigUint, b: &BigUint) -> (BigUint, bool, BigUint) {
     (old_r, old_s.1, old_s.0)
 }
 
+// ---------------------------------------------------------------------------
+// u128 modular arithmetic + Pollard-Brent for small composites
+// ---------------------------------------------------------------------------
+
+/// (a + b) mod m, safe against overflow when a, b < m.
+fn addmod_u128(a: u128, b: u128, m: u128) -> u128 {
+    let (r, overflow) = a.overflowing_add(b);
+    if overflow {
+        r.wrapping_sub(m)
+    } else if r >= m {
+        r - m
+    } else {
+        r
+    }
+}
+
+/// (a * b) mod m using binary multiplication; safe for any a, b < m < 2^128.
+fn mulmod_u128(mut a: u128, mut b: u128, m: u128) -> u128 {
+    let mut result = 0u128;
+    a %= m;
+    b %= m;
+    while b > 0 {
+        if b & 1 == 1 {
+            result = addmod_u128(result, a, m);
+        }
+        a = addmod_u128(a, a, m);
+        b >>= 1;
+    }
+    result
+}
+
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Brent's Pollard-rho over u128.  Returns a non-trivial factor of n, or None.
+fn pollard_brent_u128(n: u128) -> Option<u128> {
+    if n % 2 == 0 {
+        return Some(2);
+    }
+    if n % 3 == 0 {
+        return Some(3);
+    }
+    // Try 30 different (y, c) seeds.
+    for attempt in 0u64..30 {
+        let c = (attempt.wrapping_mul(1_000_003).wrapping_add(1)) as u128 % (n - 1) + 1;
+        let mut y = (attempt.wrapping_mul(1_000_007).wrapping_add(2)) as u128 % n;
+        let mut r: u128 = 1;
+        let batch: u128 = 128;
+        let mut q = 1u128;
+        let mut x = 0u128;
+        let mut ys = 0u128;
+        let mut g = 1u128;
+
+        'outer: while g == 1 {
+            x = y;
+            for _ in 0..r {
+                y = addmod_u128(mulmod_u128(y, y, n), c, n);
+            }
+            let mut k = 0u128;
+            while k < r && g == 1 {
+                ys = y;
+                let bound = batch.min(r - k);
+                for _ in 0..bound {
+                    y = addmod_u128(mulmod_u128(y, y, n), c, n);
+                    let diff = if x > y { x - y } else { y - x };
+                    // avoid q becoming 0
+                    q = mulmod_u128(q, diff.max(1), n);
+                }
+                g = gcd_u128(q, n);
+                k += batch;
+            }
+            r *= 2;
+            // Hard limit: give up after ~2M iterations per attempt
+            if r > 1 << 21 {
+                break 'outer;
+            }
+        }
+
+        if g == n {
+            // Backtrack step-by-step from last ys
+            loop {
+                ys = addmod_u128(mulmod_u128(ys, ys, n), c, n);
+                let diff = if x > ys { x - ys } else { ys - x };
+                g = gcd_u128(diff.max(1), n);
+                if g > 1 {
+                    break;
+                }
+                if ys == x {
+                    // Full cycle with no factor found; try next seed
+                    g = n;
+                    break;
+                }
+            }
+        }
+
+        if g > 1 && g < n {
+            return Some(g);
+        }
+    }
+    None
+}
+
+/// Try to fit a BigUint into u128; returns None if it has more than 2 u64 limbs.
+fn biguint_to_u128(n: &BigUint) -> Option<u128> {
+    let digits = n.to_u64_digits();
+    match digits.len() {
+        0 => Some(0),
+        1 => Some(digits[0] as u128),
+        2 => Some((digits[1] as u128) << 64 | digits[0] as u128),
+        _ => None,
+    }
+}
+
 /// Modular inverse of a mod n.  Returns None if gcd(a, n) != 1.
 pub fn modinv(a: &BigUint, n: &BigUint) -> Option<BigUint> {
     if n.is_one() {
@@ -608,16 +727,16 @@ pub struct FactoringStatus {
     pub complete: bool,
     /// Confirmed prime factors as (value, exponent) pairs, sorted ascending.
     pub prime_factors: Vec<(BigUint, usize)>,
-    /// How many composite sub-factors are still being analysed.
-    pub pending_count: usize,
+    /// Composite sub-factors still being analysed (value, exponent=1 each).
+    pub pending_values: Vec<BigUint>,
 }
 
 struct PendingFactor {
     n: BigUint,
     trial_div_done: bool,
-    trial_div_cursor: usize, // index into small primes list
     ecm_curves_tried: u32,
     b1: u64,
+    pollard_tried: bool,
 }
 
 struct FactorizationState {
@@ -669,9 +788,9 @@ impl Factorizer {
             state.pending.push(PendingFactor {
                 n,
                 trial_div_done: false,
-                trial_div_cursor: 0,
                 ecm_curves_tried: 0,
                 b1: 2000,
+                pollard_tried: false,
             });
         }
     }
@@ -705,15 +824,13 @@ impl Factorizer {
         let pf = &state.pending[idx];
 
         if !pf.trial_div_done {
-            let cursor = pf.trial_div_cursor;
             let n_clone = pf.n.clone();
-            // Compute sqrt bound as index limit
+            // Do all trial division in one shot — fast enough (~10ms for 78k primes),
+            // avoids wasting 80× 100ms ticks when no small factor exists.
             let (found, _remaining, new_cursor) =
-                trial_divide(&n_clone, &self.small_primes, cursor, 1000);
+                trial_divide(&n_clone, &self.small_primes, 0, self.small_primes.len());
 
             let pf = &mut state.pending[idx];
-            pf.trial_div_cursor = new_cursor;
-
             for f in found {
                 if f == pf.n {
                     // The whole number was found prime during trial div; shouldn't happen
@@ -787,11 +904,31 @@ impl Factorizer {
             }
             // else: continue trial division (cursor already updated)
         } else {
-            // ECM phase
-            let curves_tried = pf.ecm_curves_tried;
-            let b1 = pf.b1;
-            let b2 = 20 * b1;
+            // ECM phase — first try fast Pollard-Brent for composites fitting in u128
             let n_val = pf.n.clone();
+            let pollard_tried = pf.pollard_tried;
+
+            if !pollard_tried {
+                state.pending[idx].pollard_tried = true;
+                if let Some(n_u128) = biguint_to_u128(&n_val) {
+                    if let Some(f_u128) = pollard_brent_u128(n_u128) {
+                        let f = BigUint::from(f_u128);
+                        let remainder = &n_val / &f;
+                        state.pending.remove(idx);
+                        Self::add_to_pending(state, f);
+                        Self::add_to_pending(state, remainder);
+                        if state.pending.is_empty() {
+                            state.complete = true;
+                        }
+                        return;
+                    }
+                }
+                // Pollard-Brent failed (n too large or genuinely hard); fall through to ECM
+            }
+
+            let curves_tried = state.pending[idx].ecm_curves_tried;
+            let b1 = state.pending[idx].b1;
+            let b2 = 20 * b1;
 
             self.ensure_ecm_primes(b2);
 
@@ -851,7 +988,7 @@ impl Factorizer {
         FactoringStatus {
             complete: state.complete || state.pending.is_empty(),
             prime_factors: Self::group_factors(state),
-            pending_count: state.pending.len(),
+            pending_values: state.pending.iter().map(|pf| pf.n.clone()).collect(),
         }
     }
 
@@ -1043,7 +1180,7 @@ mod tests {
     }
 
     fn step_to_completion(fz: &mut Factorizer, n: &str, max: usize) -> FactoringStatus {
-        let mut last = FactoringStatus { complete: false, prime_factors: vec![], pending_count: 0 };
+        let mut last = FactoringStatus { complete: false, prime_factors: vec![], pending_values: vec![] };
         for _ in 0..max {
             last = fz.step(n).expect("valid input");
             if last.complete { return last; }

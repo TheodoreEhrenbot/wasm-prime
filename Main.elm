@@ -49,7 +49,6 @@ type QueryResult
         , probability : Float
         , factorsComplete : Bool
         , factors : List Factor
-        , pendingFactorCount : Int
         }
 
 
@@ -68,21 +67,19 @@ queryResultDecoder : D.Decoder QueryResult
 queryResultDecoder =
     D.oneOf
         [ D.map InputError (D.field "error" D.string)
-        , D.map5
-            (\prim prob complete facs pending ->
+        , D.map4
+            (\prim prob complete facs ->
                 QueryOk
                     { primality = prim
                     , probability = prob
                     , factorsComplete = complete
                     , factors = facs
-                    , pendingFactorCount = pending
                     }
             )
             (D.field "primality" D.string)
             (D.field "probability" D.float)
             (D.field "factors_complete" D.bool)
             (D.field "factors" (D.list factorDecoder))
-            (D.field "pending_factor_count" D.int)
         ]
 
 
@@ -237,7 +234,11 @@ viewFactor : Factor -> String
 viewFactor f =
     let
         base =
-            f.value
+            if f.isPrime then
+                f.value
+
+            else
+                f.value ++ " [composite]"
 
         expStr =
             if f.exp == 1 then
@@ -249,35 +250,24 @@ viewFactor f =
     expStr
 
 
-viewFactors : Bool -> List Factor -> Int -> Html Msg
-viewFactors complete factors pending =
-    if complete then
-        let
-            parts =
-                List.map viewFactor factors
+viewFactors : Bool -> List Factor -> Html Msg
+viewFactors complete factors =
+    let
+        parts =
+            List.map viewFactor factors
 
-            factorStr =
-                String.join " × " parts
-        in
-        div []
-            [ text ("Factors: " ++ factorStr) ]
+        factorStr =
+            String.join " × " parts
 
-    else
-        let
-            knownParts =
-                List.map viewFactor factors
+        label =
+            if complete then
+                "Factors: "
 
-            pendingParts =
-                List.repeat pending "[?]"
-
-            allParts =
-                knownParts ++ pendingParts
-
-            factorStr =
-                String.join " × " allParts
-        in
-        div [ style "color" "#666" ]
-            [ text ("Factoring: " ++ factorStr) ]
+            else
+                "Factoring: "
+    in
+    div []
+        [ text (label ++ factorStr) ]
 
 
 
@@ -351,7 +341,7 @@ view model =
                           else
                             viewPrimality r.primality r.probability
                         ]
-                    , viewFactors r.factorsComplete r.factors r.pendingFactorCount
+                    , viewFactors r.factorsComplete r.factors
                     ]
         ]
 
