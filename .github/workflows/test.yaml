@@ -28,7 +28,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --lib -- --test-threads=4
+        run: cargo test --lib -- --test-threads=1
 
       - name: Run tests (release mode, for timing-sensitive tests)
-        run: cargo test --release --lib -- --test-threads=4
+        run: cargo test --release --lib -- --test-threads=1
