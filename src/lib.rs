@@ -244,20 +244,62 @@ impl CheckerInner {
         build_json(primality, probability, &factoring)
     }
 
-    /// For next/prev prime search: quickly check if n is probably prime.
-    pub fn is_probably_prime(&mut self, n_str: &str) -> bool {
+    /// Find the next prime strictly greater than n_str.
+    /// Returns the prime as a decimal string, or "" on parse error.
+    pub fn find_next_prime(&self, n_str: &str) -> String {
         let n = match BigUint::parse_bytes(n_str.trim().as_bytes(), 10) {
             Some(n) => n,
-            None => return false,
+            None => return String::new(),
         };
-        if n < BigUint::from(2u32) {
-            return false;
+        let two = BigUint::from(2u32);
+        if n < two {
+            return "2".to_string();
         }
-        // Run several checks and use the deterministic result
-        for _ in 0..5 {
-            self.prime.step(&n);
+        let mut candidate = n + BigUint::one();
+        // Advance to the next odd number (even numbers > 2 are never prime)
+        if &candidate % 2u32 == BigUint::zero() {
+            candidate += BigUint::one();
         }
-        self.prime.is_probably_prime(&n)
+        for _ in 0..100_000 {
+            if is_prime(&candidate) {
+                return candidate.to_string();
+            }
+            candidate += 2u32;
+        }
+        String::new()
+    }
+
+    /// Find the largest prime strictly less than n_str.
+    /// Returns the prime as a decimal string, or "" if none exists (n ≤ 2).
+    pub fn find_prev_prime(&self, n_str: &str) -> String {
+        let n = match BigUint::parse_bytes(n_str.trim().as_bytes(), 10) {
+            Some(n) => n,
+            None => return String::new(),
+        };
+        let two = BigUint::from(2u32);
+        if n <= two {
+            return String::new();
+        }
+        if n == BigUint::from(3u32) {
+            return "2".to_string();
+        }
+        let mut candidate = n - BigUint::one();
+        // Step back to the nearest odd
+        if &candidate % 2u32 == BigUint::zero() {
+            candidate -= BigUint::one();
+        }
+        loop {
+            if candidate < two {
+                return String::new();
+            }
+            if is_prime(&candidate) {
+                return candidate.to_string();
+            }
+            if candidate <= two {
+                return String::new();
+            }
+            candidate -= 2u32;
+        }
     }
 }
 
@@ -288,9 +330,14 @@ impl Checker {
         self.0.query(&n_str)
     }
 
-    /// Returns true if n is probably prime (for next/prev prime search).
-    pub fn is_probably_prime(&mut self, n_str: String) -> bool {
-        self.0.is_probably_prime(&n_str)
+    /// Find the next prime strictly greater than n_str.
+    pub fn find_next_prime(&self, n_str: String) -> String {
+        self.0.find_next_prime(&n_str)
+    }
+
+    /// Find the largest prime strictly less than n_str.
+    pub fn find_prev_prime(&self, n_str: String) -> String {
+        self.0.find_prev_prime(&n_str)
     }
 }
 
@@ -759,12 +806,19 @@ mod tests {
     }
 
     #[test]
-    fn test_is_probably_prime_method() {
-        let mut checker = CheckerInner::new();
-        assert!(checker.is_probably_prime("7"));
-        assert!(checker.is_probably_prime("997"));
-        assert!(!checker.is_probably_prime("9"));
-        assert!(!checker.is_probably_prime("100"));
+    fn test_find_next_prev_prime() {
+        let checker = CheckerInner::new();
+        assert_eq!(checker.find_next_prime("2"), "3");
+        assert_eq!(checker.find_next_prime("3"), "5");
+        assert_eq!(checker.find_next_prime("10"), "11");
+        assert_eq!(checker.find_next_prime("14"), "17");
+        assert_eq!(checker.find_next_prime("1"), "2");
+        assert_eq!(checker.find_prev_prime("3"), "2");
+        assert_eq!(checker.find_prev_prime("11"), "7");
+        assert_eq!(checker.find_prev_prime("14"), "13");
+        assert_eq!(checker.find_prev_prime("2"), "");
+        // Large number
+        assert_eq!(checker.find_next_prime("1000000000"), "1000000007");
     }
 
     // ---------------------------------------------------------------------------

@@ -235,7 +235,9 @@ pub fn is_prime(n: &BigUint) -> bool {
         return n == &BigUint::from(3u32);
     }
 
-    // Witnesses sufficient for n < 3,317,044,064,679,887,385,961,981 (covers 64-bit range well).
+    // These 12 witnesses give a deterministic result for all n < 3,317,044,064,679,887,385,961,981.
+    // Source: Jaeschke (1993), "On strong pseudoprimes to several bases",
+    //         Math. Comp. 61(204):915–926. Table 6.
     let witnesses: &[u64] = &[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
     for &w in witnesses {
         let a = BigUint::from(w);

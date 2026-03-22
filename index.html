@@ -23,39 +23,15 @@
             app.ports.queryResult.send(result);
         });
 
-        // --- Next prime: search upward from n+1 ---
+        // --- Next / previous prime: all logic runs in Rust ---
         app.ports.findNextPrime.subscribe(function(input) {
-            let n;
-            try { n = BigInt(input); } catch(e) { return; }
-            if (n < 2n) { app.ports.nextPrimeFound.send("2"); return; }
-            let candidate = n + 1n;
-            if (candidate > 2n && candidate % 2n === 0n) candidate += 1n;
-            for (let i = 0; i < 100000; i++) {
-                if (checker.is_probably_prime(candidate.toString())) {
-                    app.ports.nextPrimeFound.send(candidate.toString());
-                    return;
-                }
-                candidate += candidate === 2n ? 1n : 2n;
-            }
-            app.ports.nextPrimeFound.send(candidate.toString());
+            const result = checker.find_next_prime(input);
+            if (result !== "") app.ports.nextPrimeFound.send(result);
         });
 
-        // --- Previous prime: search downward from n-1 ---
         app.ports.findPrevPrime.subscribe(function(input) {
-            let n;
-            try { n = BigInt(input); } catch(e) { return; }
-            if (n <= 2n) return;
-            let candidate = n - 1n;
-            if (candidate > 2n && candidate % 2n === 0n) candidate -= 1n;
-            for (let i = 0; i < 100000; i++) {
-                if (candidate < 2n) break;
-                if (checker.is_probably_prime(candidate.toString())) {
-                    app.ports.prevPrimeFound.send(candidate.toString());
-                    return;
-                }
-                if (candidate === 2n) break;
-                candidate -= 2n;
-            }
+            const result = checker.find_prev_prime(input);
+            if (result !== "") app.ports.prevPrimeFound.send(result);
         });
     </script>
 </body>
