@@ -826,4 +826,46 @@ mod tests {
             }
         }
     }
+
+
+    // -----------------------------------------------------------------------
+    // Repunit responsiveness tests  R43 – R52
+    // Each repunit is 10–52 ones; we check that every individual query() call
+    // stays under the 200 ms Elm-tick budget (debug mode).
+    // -----------------------------------------------------------------------
+
+    fn repunit(n: usize) -> String {
+        "1".repeat(n)
+    }
+
+    fn assert_repunit_responsive(digits: usize, budget_ms: u64) {
+        use std::time::Instant;
+        let n_str = repunit(digits);
+        let mut checker = CheckerInner::new();
+        // Run enough calls to exercise all phases (trial div, Pollard, ECM).
+        for i in 0..20 {
+            let t = Instant::now();
+            let json = checker.query(&n_str);
+            let ms = t.elapsed().as_millis() as u64;
+            assert!(
+                ms <= budget_ms,
+                "R{}: query({}) took {}ms, budget {}ms — UI would freeze\njson={}",
+                digits, i, ms, budget_ms, json
+            );
+            if json.contains("\"factors_complete\":true") {
+                break;
+            }
+        }
+    }
+
+    #[test] fn test_responsiveness_r43() { assert_repunit_responsive(43, 200); }
+    #[test] fn test_responsiveness_r44() { assert_repunit_responsive(44, 200); }
+    #[test] fn test_responsiveness_r45() { assert_repunit_responsive(45, 200); }
+    #[test] fn test_responsiveness_r46() { assert_repunit_responsive(46, 200); }
+    #[test] fn test_responsiveness_r47() { assert_repunit_responsive(47, 200); }
+    #[test] fn test_responsiveness_r48() { assert_repunit_responsive(48, 200); }
+    #[test] fn test_responsiveness_r49() { assert_repunit_responsive(49, 200); }
+    #[test] fn test_responsiveness_r50() { assert_repunit_responsive(50, 200); }
+    #[test] fn test_responsiveness_r51() { assert_repunit_responsive(51, 200); }
+    #[test] fn test_responsiveness_r52() { assert_repunit_responsive(52, 200); }
 }
